@@ -26,15 +26,22 @@ Core stack:
 - Apple Silicon inference foundation: MLX / mlx-lm
 - Model: `mlx-works/Qwen3.6-35B-A3B-oQ2-mtp`
 - Agent: Pi Agent connected to an oMLX OpenAI-compatible endpoint
-- Long-context strategy: 128K configured context, with tool-result truncation and prefix cache to control real context growth
+- Long-context strategy: 64K configured context, with tool-result truncation and prefix cache to control real context growth
 - Decode acceleration: built-in Lightning MTP enabled
 - Prefill acceleration: Qwen3.5/3.6 ANE prefill + GDN enabled
-- Cache: 8GB SSD cache + 2GB hot cache
+- KV cache: TurboQuant at 8-bit (FP8), the conservative setting chosen for output quality
+- Cache: 50GB SSD cache + 2GB hot cache
 - Explicitly disabled: DFlash2 and SpecPrefill
+
+> **2026-09-06 update:** To improve code quality, the KV cache quantization was changed from 4-bit to the more conservative 8-bit (FP8), and the configured context was set to 64K. oMLX keeps prefill in exact fp16 and quantizes the KV once after prefill, so quantization error only enters decode-time reads: 8-bit is near-lossless while keeping most of the memory savings. The previous 4-bit / 128K startup script is kept as `start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak`.
 
 Startup script:
 
-[skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh](skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh)
+[skills/mac-token-free-coding-agent/scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh](skills/mac-token-free-coding-agent/scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh)
+
+Previous baseline script (4-bit KV, 128K, port 8012):
+
+[skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak](skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak)
 
 Reusable Codex skill:
 
@@ -57,8 +64,8 @@ Tested hardware:
 | Unified memory | 32 GB |
 | macOS | 26.3 |
 | Build | `25D2125` |
-| oMLX profile | `qwen36-35b-a3b-oq2-mtp-cache-coding-agent` |
-| oMLX endpoint | `http://127.0.0.1:8012/v1` |
+| oMLX profile | `qwen36-35b-a3b-oq2-fp8kv-64k` |
+| oMLX endpoint | `http://127.0.0.1:8014/v1` |
 
 Key runtime signals observed in oMLX logs:
 
@@ -69,8 +76,8 @@ Key runtime signals observed in oMLX logs:
 | ANE prefill | warmed 136 ANE procedures |
 | ANE programs | 41 MLP + 27 GDN procedures, sequence length 2048 |
 | Loaded model memory | actual 14.25GB |
-| TurboQuant KV | 9/40 cache layers converted to 4-bit, skipped last KVCache layer |
-| Paged SSD cache | max 8.00GB |
+| TurboQuant KV | KV cache layers converted to 8-bit (FP8), skipped last KVCache layer |
+| Paged SSD cache | max 50.00GB |
 | Hot cache | 2.00GB |
 | Metal cap warning | Apple default cap about 25GB; `iogpu.wired_limit_mb` unset |
 
@@ -82,8 +89,8 @@ The observed agent was Pi Agent connected to local oMLX:
 | --- | --- |
 | Agent | Pi Agent |
 | Connection | OpenAI-compatible API |
-| Base URL | `http://127.0.0.1:8012/v1` |
-| Model alias | `qwen36-35b-a3b-oq2-mtp-cache-coding-agent` |
+| Base URL | `http://127.0.0.1:8014/v1` |
+| Model alias | `qwen36-35b-a3b-oq2-fp8kv-64k` |
 | Workload | Multi-turn coding-agent interaction, mostly reading existing code |
 | Typical prompt range | 9k to 45k tokens |
 | Typical stop reason | `tool_calls` and `stop` |
@@ -92,7 +99,7 @@ The observed agent was Pi Agent connected to local oMLX:
 
 | Parameter | Baseline | Notes |
 | --- | ---: | --- |
-| `MAX_CONTEXT_WINDOW` | `131072` | 128K upper bound for long-context coding, not an invitation to keep unlimited history |
+| `MAX_CONTEXT_WINDOW` | `65536` | 64K upper bound; keeps prefill latency predictable and avoids repeated auto-compaction on smaller windows |
 | `MAX_TOOL_RESULT_TOKENS` | `800` | Critical for keeping agent context growth under control |
 | `MAX_TOKENS` | `2048` | Caps single-turn output to keep interaction responsive |
 | `TEMPERATURE` | `0.2` | Stable behavior for coding |
@@ -101,16 +108,18 @@ The observed agent was Pi Agent connected to local oMLX:
 | `MTP` | on | Uses the model's retained MTP heads for decode acceleration |
 | `DFlash2` | off | MTP and DFlash are separate speculative decode paths; this baseline prioritizes MTP |
 | `SpecPrefill` | off | Reduces complexity around Qwen/ANE/cache paths |
-| `TurboQuant KV` | on, 4-bit | Prioritizes memory headroom for long contexts |
+| `TurboQuant KV` | on, 8-bit (FP8) | Conservative quantization chosen for output quality; prefill stays exact fp16 and KV is quantized once after prefill |
 | `ANE prefill` | on | Lets Apple Neural Engine share part of Qwen prefill work |
 | `ANE fraction` | `0.53` | Community-benchmark-style balanced value |
 | `GDN` | on | Enables Qwen3.5/3.6 prefill optimizations |
-| `SSD cache` | `8GB` | Cold cache for more reusable context blocks |
+| `SSD cache` | `50GB` | Cold cache for more reusable context blocks |
 | `hot cache` | `2GB` | Hot cache for recently used blocks |
 | `max_concurrent_requests` | `1` | Keeps local coding-agent inference predictable |
 | `memory_guard_gb` | `27` | Conservative guard for a 32GB Mac |
 
 ### Measured Results
+
+> The measurements below were captured on the **previous** baseline (4-bit KV, 128K context, port 8012) on 2026-08-28. They are kept as historical evidence of the workload shape; re-run the same measurement recipe against the current FP8 / 64K baseline for fresh numbers.
 
 Log source:
 
@@ -190,14 +199,14 @@ The logs showed 18 `Prefill throttled` events. This is not a script bug; it is t
 3. Start oMLX.
 
    ```bash
-   ./skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh
+   ./skills/mac-token-free-coding-agent/scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh
    ```
 
 4. Point Pi Agent or another OpenAI-compatible coding agent to:
 
    ```text
-   base_url = http://127.0.0.1:8012/v1
-   model = qwen36-35b-a3b-oq2-mtp-cache-coding-agent
+   base_url = http://127.0.0.1:8014/v1
+   model = qwen36-35b-a3b-oq2-fp8kv-64k
    ```
 
 5. Verify these log signals:
@@ -205,7 +214,8 @@ The logs showed 18 `Prefill throttled` events. This is not a script bug; it is t
    - `Loaded settings for 1 models`
    - `Speculative backend selected ... Lightning MTP ... active`
    - `Warmed 136 ANE procedures`
-   - `PagedSSDCacheManager initialized ... max_size=8.00 GB, hot_cache=2.00 GB`
+   - `TurboQuant: ... cache layers set to 8.0-bit, skipped last KVCache layer`
+   - `PagedSSDCacheManager initialized ... max_size=50.00 GB, hot_cache=2.00 GB`
    - `Chat completion: model=Qwen3.6-35B-A3B-oQ2-mtp`
 
 ### Key Open-Source Technologies
@@ -258,15 +268,22 @@ Mac Token Free 的目标很直接：帮助 Mac 用户在本地实现接近“tok
 - 底层 Apple Silicon 推理生态：MLX / mlx-lm
 - 模型：`mlx-works/Qwen3.6-35B-A3B-oQ2-mtp`
 - Agent：Pi Agent，连接 oMLX 的 OpenAI-compatible endpoint
-- 长上下文策略：128K 配置上限，coding 过程通过工具结果截断和 prefix cache 控制实际上下文膨胀
+- 长上下文策略：64K 配置上限，coding 过程通过工具结果截断和 prefix cache 控制实际上下文膨胀
 - Decode 加速：保留模型内置 Lightning MTP
 - Prefill 加速：启用 Qwen3.5/3.6 ANE prefill + GDN 路径
-- Cache：8GB SSD cache + 2GB hot cache
+- KV cache：TurboQuant 8-bit（FP8），为输出质量选择的保守档位
+- Cache：50GB SSD cache + 2GB hot cache
 - 明确不启用：DFlash2、SpecPrefill
+
+> **2026-09-06 更新**：为了提高代码质量，KV cache 的量化参数从 4-bit 改成了更加保守的 FP8（8-bit），上下文上限调整为 64K。oMLX 的实现是 prefill 全程保持 fp16 精确计算、prefill 完成后再对 KV 一次性量化，量化误差只进 decode 读取——8-bit 接近无损，同时保留了大部分内存收益。原来的 4-bit / 128K 启动脚本保留为 `start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak`。
 
 启动脚本在：
 
-[skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh](skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh)
+[skills/mac-token-free-coding-agent/scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh](skills/mac-token-free-coding-agent/scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh)
+
+上一代基线脚本（4-bit KV / 128K / 端口 8012）：
+
+[skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak](skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak)
 
 可复用的 Codex skill 在：
 
@@ -289,8 +306,8 @@ Mac Token Free 的目标很直接：帮助 Mac 用户在本地实现接近“tok
 | Unified memory | 32 GB |
 | macOS | 26.3 |
 | Build | `25D2125` |
-| oMLX profile | `qwen36-35b-a3b-oq2-mtp-cache-coding-agent` |
-| oMLX endpoint | `http://127.0.0.1:8012/v1` |
+| oMLX profile | `qwen36-35b-a3b-oq2-fp8kv-64k` |
+| oMLX endpoint | `http://127.0.0.1:8014/v1` |
 
 oMLX 日志里的关键运行状态：
 
@@ -301,8 +318,8 @@ oMLX 日志里的关键运行状态：
 | ANE prefill | warmed 136 ANE procedures |
 | ANE programs | 41 MLP + 27 GDN procedures, sequence length 2048 |
 | Loaded model memory | actual 14.25GB |
-| TurboQuant KV | 9/40 cache layers converted to 4-bit, skipped last KVCache layer |
-| Paged SSD cache | max 8.00GB |
+| TurboQuant KV | KV cache 层转为 8-bit（FP8），skipped last KVCache layer |
+| Paged SSD cache | max 50.00GB |
 | Hot cache | 2.00GB |
 | Metal cap warning | Apple default cap about 25GB; `iogpu.wired_limit_mb` unset |
 
@@ -314,8 +331,8 @@ oMLX 日志里的关键运行状态：
 | --- | --- |
 | Agent | Pi Agent |
 | 连接方式 | OpenAI-compatible API |
-| Base URL | `http://127.0.0.1:8012/v1` |
-| Model alias | `qwen36-35b-a3b-oq2-mtp-cache-coding-agent` |
+| Base URL | `http://127.0.0.1:8014/v1` |
+| Model alias | `qwen36-35b-a3b-oq2-fp8kv-64k` |
 | 工作负载 | 多轮 coding agent 交互，读已有代码为主 |
 | 典型 prompt 范围 | 9k 到 45k tokens |
 | 典型 stop reason | `tool_calls` 和 `stop` |
@@ -324,7 +341,7 @@ oMLX 日志里的关键运行状态：
 
 | 参数 | 当前基线 | 说明 |
 | --- | ---: | --- |
-| `MAX_CONTEXT_WINDOW` | `131072` | 128K 上限，适合长上下文 coding，但不鼓励无限堆历史 |
+| `MAX_CONTEXT_WINDOW` | `65536` | 64K 上限；prefill 延迟更可控，也避免小窗口下反复触发自动压缩 |
 | `MAX_TOOL_RESULT_TOKENS` | `800` | 限制工具结果膨胀，这是 agent 体感流畅的关键之一 |
 | `MAX_TOKENS` | `2048` | 单轮输出上限，避免长篇输出拖慢交互 |
 | `TEMPERATURE` | `0.2` | coding agent 偏稳定 |
@@ -333,16 +350,18 @@ oMLX 日志里的关键运行状态：
 | `MTP` | on | 使用模型保留的 MTP head 做 decode 加速 |
 | `DFlash2` | off | 与 MTP 属于两条 speculative decode 路径；coding 读代码场景优先 MTP |
 | `SpecPrefill` | off | 控制变量，避免和 Qwen/ANE/cache 路径叠复杂度 |
-| `TurboQuant KV` | on, 4-bit | 长上下文下优先保护内存 |
+| `TurboQuant KV` | on, 8-bit (FP8) | 为输出质量选择的保守量化；prefill 保持 fp16 精确，KV 在 prefill 后一次性量化 |
 | `ANE prefill` | on | 让 Apple Neural Engine 分担 Qwen prefill 工作 |
 | `ANE fraction` | `0.53` | 社区 benchmark 常用的平衡值 |
 | `GDN` | on | 启用 Qwen3.5/3.6 相关 prefill 优化 |
-| `SSD cache` | `8GB` | 冷 cache，存更多可复用上下文块 |
+| `SSD cache` | `50GB` | 冷 cache，存更多可复用上下文块 |
 | `hot cache` | `2GB` | 热 cache，放最近最常用的块，换取更快命中 |
 | `max_concurrent_requests` | `1` | 本地 coding agent 优先单请求低干扰 |
 | `memory_guard_gb` | `27` | 32GB 机器保守保护系统可用性 |
 
 ### 实测数据
+
+> 以下数据来自**上一代**基线（4-bit KV / 128K / 端口 8012），采集于 2026-08-28。保留作为负载形态的历史证据；请用同样的测量方法对当前 FP8 / 64K 基线重新采集。
 
 日志来源：
 
@@ -420,14 +439,14 @@ Decode 侧是流畅的：MTP 明确启用，多数轮 decode wall time 在 1 到
 3. 启动 oMLX。
 
    ```bash
-   ./skills/mac-token-free-coding-agent/scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh
+   ./skills/mac-token-free-coding-agent/scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh
    ```
 
 4. 将 Pi Agent 或其他 OpenAI-compatible coding agent 指向：
 
    ```text
-   base_url = http://127.0.0.1:8012/v1
-   model = qwen36-35b-a3b-oq2-mtp-cache-coding-agent
+   base_url = http://127.0.0.1:8014/v1
+   model = qwen36-35b-a3b-oq2-fp8kv-64k
    ```
 
 5. 验证日志里出现这些信号：
@@ -435,7 +454,8 @@ Decode 侧是流畅的：MTP 明确启用，多数轮 decode wall time 在 1 到
    - `Loaded settings for 1 models`
    - `Speculative backend selected ... Lightning MTP ... active`
    - `Warmed 136 ANE procedures`
-   - `PagedSSDCacheManager initialized ... max_size=8.00 GB, hot_cache=2.00 GB`
+   - `TurboQuant: ... cache layers set to 8.0-bit, skipped last KVCache layer`
+   - `PagedSSDCacheManager initialized ... max_size=50.00 GB, hot_cache=2.00 GB`
    - `Chat completion: model=Qwen3.6-35B-A3B-oQ2-mtp`
 
 ### 关键开源技术

@@ -1,6 +1,6 @@
 ---
 name: mac-token-free-coding-agent
-description: Set up or reproduce a Mac local long-context coding-agent baseline using oMLX, Qwen3.6-35B-A3B-oQ2-mtp, Lightning MTP, ANE prefill, and tiered cache.
+description: Set up or reproduce a Mac local long-context coding-agent baseline using oMLX, Qwen3.6-35B-A3B-oQ2-mtp, Lightning MTP, ANE prefill, FP8 (8-bit) TurboQuant KV, and tiered cache.
 ---
 
 # Mac Token Free Coding Agent
@@ -13,12 +13,12 @@ The goal is a practical "token free" local agent setup: no cloud per-token billi
 
 Default to this stack unless the user asks for a different experiment:
 
-- Inference server: oMLX, OpenAI-compatible API on `127.0.0.1:8012`.
+- Inference server: oMLX, OpenAI-compatible API on `127.0.0.1:8014`.
 - Model: `mlx-works/Qwen3.6-35B-A3B-oQ2-mtp`.
 - Agent: Pi Agent or any OpenAI-compatible coding agent.
 - Model directory: `$HOME/.lmstudio/models/mlx-works/Qwen3.6-35B-A3B-oQ2-mtp`.
-- Startup script: `scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh`.
-- Alias: `qwen36-35b-a3b-oq2-mtp-cache-coding-agent`.
+- Startup script: `scripts/start-omlx-qwen36-35b-a3b-oq2-fp8kv-64k.sh`.
+- Alias: `qwen36-35b-a3b-oq2-fp8kv-64k`.
 
 Important baseline choices:
 
@@ -26,10 +26,12 @@ Important baseline choices:
 - Keep DFlash2 disabled for this model. MTP and DFlash are separate speculative decode paths; this baseline is MTP-only.
 - Keep SpecPrefill disabled.
 - Keep Qwen3.5/3.6 ANE prefill enabled, including GDN.
-- Keep TurboQuant KV enabled at 4-bit unless benchmarking proves it hurts the user's workload.
-- Use `128K` max context, but treat 35k+ prompt tokens as the point where prefill latency becomes visible.
+- Keep TurboQuant KV enabled at 8-bit (FP8). On 2026-09-06 the KV quantization was moved from 4-bit to the more conservative 8-bit FP8 to improve output quality; 8-bit keeps most of the memory savings while staying near-lossless, because oMLX keeps prefill in exact fp16 and quantizes the KV once after prefill, so quantization error only enters decode-time reads.
+- Use `64K` max context. The 64K window keeps prefill latency predictable and, together with Pi-side auto compaction, avoids the repeated-compaction loops observed on smaller windows.
 - Keep tool-result truncation around `800` tokens for coding-agent use.
-- Use `8GB` paged SSD cache and `2GB` hot cache on 32GB unified-memory Macs.
+- Use `50GB` paged SSD cache and `2GB` hot cache on 32GB unified-memory Macs.
+
+The previous baseline (4-bit KV, 128K context, port 8012) is preserved as `scripts/start-omlx-qwen3.6-35b-a3b-oq2-mtp-cache-coding-agent.sh.bak`.
 
 ## Workflow
 
@@ -46,7 +48,7 @@ When implementing the baseline:
 
 1. Copy the bundled startup script into the user's chosen project or scripts directory.
 2. Keep the model path and alias explicit.
-3. If registering an agent, point it at `http://127.0.0.1:8012/v1` and the baseline alias.
+3. If registering an agent, point it at `http://127.0.0.1:8014/v1` and the baseline alias `qwen36-35b-a3b-oq2-fp8kv-64k`.
 4. Preserve unrelated Pi/oMLX/user configuration; back up edited config files first.
 5. Validate scripts with `bash -n` and a dry-run using `OMLX_CLI=/usr/bin/true` when possible.
 
@@ -56,8 +58,8 @@ When verifying a running server, look for these oMLX log signals:
 - `Speculative backend selected ... Lightning MTP ... active`
 - `Warmed ... ANE procedures`
 - `Eagerly compiled ... MLP ... GDN procedures`
-- `TurboQuant KV cache enabled`
-- `PagedSSDCacheManager initialized ... max_size=8.00 GB, hot_cache=2.00 GB`
+- `TurboQuant: ... cache layers set to 8.0-bit, skipped last KVCache layer`
+- `PagedSSDCacheManager initialized ... max_size=50.00 GB, hot_cache=2.00 GB`
 - `Chat completion: model=Qwen3.6-35B-A3B-oQ2-mtp`
 
 ## Benchmark Evidence
